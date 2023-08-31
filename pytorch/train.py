@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from data import SentencePieceTokenizer, TextDataset, Collate
 from model import SimplexTransformerModel
-from utils import append_dims, count_parameters, cosine_decay_with_warmup
+from utils import append_dims, count_parameters, cosine_decay_with_warmup, update_model_ema
 
 torch.set_float32_matmul_precision('high')
 
@@ -67,11 +67,26 @@ def train():
     num_params = count_parameters(model)
     print(f"Total number of parameters: {num_params:,}")
 
+    ema_model = SimplexTransformerModel(
+        num_classes=len(tokenizer),
+        model_dim=args.model_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        dropout_prob=args.dropout_prob,
+        layerdrop_prob=args.layerdrop_prob,
+    )
+    ema_model.to(device)
+
+    if 'ema_model_state_dict' in checkpoint:
+        ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+    else:
+        ema_model.load_state_dict(model.state_dict())
+
     bayesian_flow = BayesianFlow(num_classes=len(tokenizer), beta=3.0)
 
-    model.eval()
+    ema_model.eval()
     probs = bayesian_flow.discrete_data_sample(
-        model,
+        ema_model,
         size=(8, args.crop_length),
         num_steps=100,
         device=device
@@ -139,6 +154,7 @@ def train():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optim.step()
                 optim.zero_grad()
+                update_model_ema(model, ema_model, 0.95)
                 global_step += 1
 
             metrics = {
@@ -150,13 +166,14 @@ def train():
                 checkpoint = {
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
+                    'ema_model_state_dict': ema_model.state_dict(),
                     'optimizer_state_dict': optim.state_dict()
                 }
                 torch.save(checkpoint, args.checkpoint)
 
-                model.eval()
+                ema_model.eval()
                 probs = bayesian_flow.discrete_data_sample(
-                    model,
+                    ema_model,
                     size=(8, args.crop_length),
                     num_steps=100,
                     device=device
