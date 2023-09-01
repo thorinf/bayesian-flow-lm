@@ -1,4 +1,5 @@
 import random
+from logging import getLogger
 
 import sentencepiece as spm
 import torch
@@ -6,27 +7,29 @@ from torch.utils.data import Dataset
 
 from utils import get_line_offsets
 
+logger = getLogger('root')
+
 
 class SentencePieceTokenizer:
-    def __init__(self, model_file: str):
-        self.sp = spm.SentencePieceProcessor(model_file=model_file)
+    def __init__(self, model_path: str):
+        self.sp_model = spm.SentencePieceProcessor(model_file=model_path)
+        logger.info(f"Reloaded SentencePiece model from {model_path}")
+
+        self.num_words: int = self.sp_model.vocab_size()
+        self.bos_id: int = self.sp_model.bos_id()
+        self.eos_id: int = self.sp_model.eos_id()
+        self.pad_id: int = self.sp_model.pad_id()
+        logger.info(f"Vocab Size: {self.num_words}.")
+        assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     def __len__(self):
-        return len(self.sp)
-
-    @property
-    def eos_id(self):
-        return self.sp.eos_id()
-
-    @property
-    def pad_id(self):
-        return self.sp.pad_id()
+        return self.num_words
 
     def encode(self, text):
-        return self.sp.encode(text)
+        return self.sp_model.encode(text)
 
     def decode(self, encoded):
-        return self.sp.decode(encoded)
+        return self.sp_model.decode(encoded)
 
 
 class TextDataset(torch.utils.data.Dataset):
