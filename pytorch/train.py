@@ -8,18 +8,29 @@ from tqdm import tqdm
 
 from data import SentencePieceTokenizer, TextDataset, Collate
 from model import SimplexTransformerModel
-from utils import append_dims, count_parameters, cosine_decay_with_warmup, update_model_ema
+from utils import append_dims, count_parameters, cosine_decay_with_warmup, update_model_ema, get_text
 from monitoring import get_initialised_logger
 
 
 @torch.no_grad()
-def eval_model(model, bayesian_flow, size, device):
+def eval_model(model, bayesian_flow, size, device, conditional_ids=None):
+    ids = torch.zeros(size, dtype=torch.int64, device=device)
+    conditional_mask = torch.zeros_like(ids, dtype=torch.bool)
+
+    if conditional_ids is not None:
+        for i, sublist in enumerate(conditional_ids):
+            sublist_len = len(sublist)
+            ids[i, :sublist_len] = torch.tensor(sublist, device=device)
+            conditional_mask[i, :sublist_len] = True
+
     model.eval()
     probs = bayesian_flow.discrete_data_sample(
         model,
         size=size,
         num_steps=100,
-        device=device
+        device=device,
+        conditional_mask=conditional_mask,
+        conditional_ids=ids
     )
     return probs.argmax(-1).cpu().tolist()
 
@@ -106,11 +117,15 @@ def train():
 
     bayesian_flow = BayesianFlow(num_classes=len(tokenizer), beta=args.beta)
 
+    conditional_starts = get_text("conditional_starts.txt")
+    conditional_ids = tokenizer.encode(conditional_starts)
+
     output_ids = eval_model(
         model=ema_model,
         bayesian_flow=bayesian_flow,
         size=(8, args.sequence_length),
         device=device,
+        conditional_ids=conditional_ids
     )
     decoded = tokenizer.decode(output_ids)
     [logger.info(f"Sample {i}:\t{text}") for i, text in enumerate(decoded)]
@@ -201,6 +216,7 @@ def train():
                     bayesian_flow=bayesian_flow,
                     size=(8, args.sequence_length),
                     device=device,
+                    conditional_ids=conditional_ids
                 )
                 decoded = tokenizer.decode(output_ids)
 
