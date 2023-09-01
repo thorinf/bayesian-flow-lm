@@ -43,14 +43,18 @@ def train():
 
     parser.add_argument('-b', '--beta', type=float, default=3.0)
 
-    parser.add_argument('-ckpt', '--checkpoint', type=str, required=True)
+    parser.add_argument('-mdir', '--model_dir', type=str, required=True)
     parser.add_argument('-d', '--data_path', type=str, required=True)
     parser.add_argument('-spm', '--spm_model', type=str, required=True)
     parser.add_argument('-slen', '--sequence_length', type=int, default=64)
     parser.add_argument('-ngen', '--num_examples', type=int, default=8)
 
     args = parser.parse_args()
-    logger = get_initialised_logger()
+
+    checkpoint_path = os.path.join(args.model_dir, "checkpoint.pt")
+    logfile_path = os.path.join(args.model_dir, "logfile.log")
+
+    logger = get_initialised_logger(logfile_path=logfile_path)
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -69,11 +73,11 @@ def train():
     )
     model.to(device)
 
-    if os.path.exists(args.checkpoint):
-        logger.info(f"Reloading checkpoint: {args.checkpoint}.")
-        checkpoint = torch.load(args.checkpoint)
+    if os.path.exists(checkpoint_path):
+        logger.info(f"Reloading checkpoint: {checkpoint_path}.")
+        checkpoint = torch.load(checkpoint_path)
     else:
-        logger.info(f"Starting new checkpoint: {args.checkpoint}.")
+        logger.info(f"Starting new checkpoint: {checkpoint_path}.")
         checkpoint = {}
 
     if 'model_state_dict' in checkpoint:
@@ -186,8 +190,8 @@ def train():
                     'ema_model_state_dict': ema_model.state_dict(),
                     'optimizer_state_dict': optim.state_dict()
                 }
-                logger.info(f"Saving checkpoint: {args.checkpoint}.")
-                torch.save(checkpoint, args.checkpoint)
+                logger.info(f"Saving checkpoint: {checkpoint_path}.")
+                torch.save(checkpoint, checkpoint_path)
 
             if ((idx + 1) % 5000 == 0) or (idx + 1 == len(dataloader)):
                 logger.info(f"Sampling from model started.")
