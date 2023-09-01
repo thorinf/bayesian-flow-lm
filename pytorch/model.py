@@ -112,10 +112,8 @@ class SimplexTransformerModel(nn.Module):
         self.layerdrop_prob = layerdrop_prob
 
         self.project = nn.Sequential(
-            nn.Linear(num_classes, model_dim),
-            nn.GELU(),
-            nn.Dropout(p=dropout_prob),
-            nn.Linear(model_dim, model_dim)
+            nn.Linear(num_classes, model_dim, bias=False),
+            nn.Dropout(p=dropout_prob)
         )
 
         self.time_mlp = nn.Sequential(
@@ -137,12 +135,20 @@ class SimplexTransformerModel(nn.Module):
             for _ in range(num_layers))
 
         self.out = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
             nn.LayerNorm(model_dim),
-            nn.GELU(),
-            nn.Dropout(p=dropout_prob),
-            nn.Linear(model_dim, num_classes)
+            nn.Linear(model_dim, num_classes, bias=False)
         )
+
+        self.apply(self.initialise_weights)
+
+    @staticmethod
+    def initialise_weights(module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.001)
 
     @staticmethod
     def self_attention_mask(length_mask):
@@ -163,7 +169,7 @@ class SimplexTransformerModel(nn.Module):
         if conditional_mask is not None and conditional_ids is not None:
             conditional_simplex = F.one_hot(conditional_ids, self.num_classes)
             simplex = torch.where(append_dims(conditional_mask, simplex.ndim), conditional_simplex, simplex)
-            t = t.masked_fill(append_dims(conditional_mask, simplex.ndim), 1.0)
+            t = t.masked_fill(append_dims(conditional_mask, t.ndim), 1.0)
 
         x = self.project(simplex) + self.time_mlp(t)
 
