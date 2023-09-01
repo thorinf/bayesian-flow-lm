@@ -19,7 +19,7 @@ class SentencePieceTokenizer:
         self.bos_id: int = self.sp_model.bos_id()
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
-        logger.info(f"Vocab Size: {self.num_words}.")
+        logger.info(f"Vocab Size: {self.num_words:,}.")
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     def __len__(self):
@@ -36,7 +36,10 @@ class TextDataset(torch.utils.data.Dataset):
     def __init__(self, path: str, tokenizer: SentencePieceTokenizer):
         self.path = path
         self.tokenizer = tokenizer
+
+        logger.info(f"Finding lines in large text file {path}")
         self.offsets = get_line_offsets(path)
+        logger.info(f"Found {len(self.offsets):,} lines in {path}")
 
     def __len__(self) -> int:
         return len(self.offsets)
@@ -119,4 +122,6 @@ class Collate:
             padding_value=False
         )
 
-        return ids, lengths, conditional_mask
+        length_mask = torch.lt(torch.arange(ids.shape[1]).unsqueeze(0), lengths.unsqueeze(1))
+
+        return ids, length_mask, conditional_mask
