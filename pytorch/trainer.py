@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data import Collate
-from utils import count_parameters
+from utils import get_named_float_tensors, update_ema_parameters
 
 logger = getLogger()
 
@@ -43,7 +43,7 @@ class Trainer:
         self.accumulation_steps = accumulation_steps
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        self.ema_rate = ema_rate
+        self.ema_rate = [ema_rate] if isinstance(ema_rate, float) else [float(x) for x in ema_rate.split(",")]
         self.model_dir = model_dir
         self.log_interval = log_interval
         self.save_interval = save_interval
@@ -58,8 +58,7 @@ class Trainer:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.model.to(self.device)
-
-        self.ema_model = copy.deepcopy(model)
+        self.load_model_checkpoint()
 
         self.optim = torch.optim.AdamW(
             self.model.parameters(),
@@ -67,82 +66,98 @@ class Trainer:
             weight_decay=self.weight_decay,
             betas=(0.9, 0.98)
         )
+        self.load_optim_checkpoint()
+
+        self.ema_named_tensors = []
+        self.load_ema_checkpoints()
+
         self.loss_elem_since_optim = None
-
-        if self.resume_checkpoint:
-            self.load()
-
         self.iters_since_log = 0
         self.prev_log_time = time.time()
         self.loss_iter = 0
 
-    def load(self):
-        checkpoint_path = os.path.join(self.model_dir, "checkpoint.pt")
-
+    def load_model_checkpoint(self):
+        checkpoint_path = os.path.join(self.model_dir, "model.pt")
         if os.path.exists(checkpoint_path):
-            logger.info(f"Reloading checkpoint: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path)
-        else:
-            logger.info(f"Starting new checkpoint: {checkpoint_path}")
-            checkpoint = {}
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            model_state_dict = torch.load(checkpoint_path)
+            self.model.load_state_dict(model_state_dict, strict=False)
 
-        if 'model_state_dict' in checkpoint:
-            logger.info(f"Model state found in checkpoint")
-            self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    def load_optim_checkpoint(self):
+        checkpoint_path = os.path.join(self.model_dir, "optim.pt")
+        if os.path.exists(checkpoint_path):
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            optim_state_dict = torch.load(checkpoint_path)
+            self.global_step = optim_state_dict.pop('global_step', self.global_step)
+            self.optim.load_state_dict(optim_state_dict)
 
-        num_params = count_parameters(self.model)
-        logger.info(f"Total number of parameters: {num_params:,}")
-
-        if 'ema_model_state_dict' in checkpoint:
-            logger.info(f"EMA model state found in checkpoint")
-            self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
-        else:
-            logger.info(f"Initialising EMA model with model state")
-            self.ema_model.load_state_dict(self.model.state_dict())
-
-        if 'optimizer_state_dict' in checkpoint:
-            logger.info(f"Optimizer state found in checkpoint")
-            self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        self.global_step = checkpoint.get('global_step', 0)
-        logger.info(f"Number of completed training steps: {self.global_step:,}")
+    def load_ema_checkpoints(self):
+        all_named_tensors = get_named_float_tensors(self.model, include_buffers=True)
+        for rate in self.ema_rate:
+            ema_checkpoint_path = os.path.join(self.model_dir, f"ema_{rate}.pt")
+            if os.path.exists(ema_checkpoint_path):
+                logger.info(f"Loading EMA checkpoint: {ema_checkpoint_path}")
+                ema_state_dict = torch.load(ema_checkpoint_path)
+                # Update or get tensors from the EMA state dict using model tensors names
+                ema_named_tensors = [(key, ema_state_dict.get(key, value)) for key, value in all_named_tensors]
+            else:
+                logger.info(f"Initializing new EMA model with EMA rate of {rate}")
+                # Initialize EMA tensors with model's named tensors
+                ema_named_tensors = copy.deepcopy(all_named_tensors)
+            self.ema_named_tensors.append(ema_named_tensors)
 
     def save(self):
-        checkpoint_path = os.path.join(self.model_dir, "checkpoint.pt")
-        logger.info(f"Saving checkpoint: {checkpoint_path}.")
-        checkpoint = {
-            'global_step': self.global_step,
-            'model_state_dict': self.model.state_dict(),
-            'ema_model_state_dict': self.ema_model.state_dict(),
-            'optimizer_state_dict': self.optim.state_dict()
-        }
-        torch.save(checkpoint, checkpoint_path)
+        for ema_named_tensors, rate in zip(self.ema_named_tensors, self.ema_rate):
+            ema_state_dict = self.model.state_dict()
+            for name, tensor in ema_named_tensors:
+                ema_state_dict[name] = tensor
+            checkpoint_path = os.path.join(self.model_dir, f"ema_{rate}.pt")
+            logger.info(f"Saving checkpoint: {checkpoint_path}")
+            torch.save(ema_state_dict, checkpoint_path)
+
+        model_state_dict = self.model.state_dict()
+        checkpoint_path = os.path.join(self.model_dir, "model.pt")
+        logger.info(f"Saving checkpoint: {checkpoint_path}")
+        torch.save(model_state_dict, checkpoint_path)
+
+        optim_state_dict = self.optim.state_dict()
+        optim_state_dict['global_step'] = self.global_step
+        checkpoint_path = os.path.join(self.model_dir, "optim.pt")
+        logger.info(f"Saving checkpoint: {checkpoint_path}")
+        torch.save(optim_state_dict, checkpoint_path)
+
+    def update_ema_parameters(self):
+        model_state_dict = self.model.state_dict()
+        for ema_named_tensors, rate in zip(self.ema_named_tensors, self.ema_rate):
+            model_parameters = []
+            ema_model_parameters = []
+
+            for key, ema_parameter in ema_named_tensors:
+                ema_model_parameters.append(ema_parameter)
+                model_parameters.append(model_state_dict[key])
+
+            update_ema_parameters(ema_model_parameters, model_parameters, rate)
 
     def log(self):
-        time_now = time.time()
-        duration = time_now - self.prev_log_time
+        current_time = time.time()
+        time_elapsed = current_time - self.prev_log_time
+        iteration_rate = self.iters_since_log / time_elapsed
 
-        iter_rate = self.iters_since_log / duration
-
-        logger.info(
+        log_msg = (
             f"Global step: {self.global_step:,}, "
-            f"Iteration loss: {self.loss_iter:,.4e}, "
-            f"Learning rate: {self.optim.param_groups[0]['lr']:,.4e}, "
-            f"Throughput: {iter_rate:,.4f} it/s"
+            f"Iteration loss: {self.loss_iter:.4e}, "
+            f"Learning rate: {self.optim.param_groups[0]['lr']:.4e}, "
+            f"Throughput: {iteration_rate:.4f} it/s"
         )
+        logger.info(log_msg)
 
         self.iters_since_log = 0
-        self.prev_log_time = time_now
-
-    def update_ema_model(self):
-        for weight, ema_weight in zip(self.model.parameters(), self.ema_model.parameters()):
-            ema_weight.mul_(self.ema_rate).add_(weight, alpha=1 - self.ema_rate)
+        self.prev_log_time = current_time
 
     def sample(self):
         logger.info(f"Sampling started...")
 
-        model = self.ema_model if hasattr(self, 'ema_model') else self.model
-        tokenizer, bayesian_flow = self.tokenizer, self.bayesian_flow
+        model, tokenizer, bayesian_flow = self.model, self.tokenizer, self.bayesian_flow
 
         conditional_ids = tokenizer.encode(self.sample_conditioning)
 
@@ -258,6 +273,7 @@ class Trainer:
                 self.iters_since_log += 1
 
             self.optimise()
+            self.update_ema_parameters()
 
             if self.global_step % self.log_interval == 0:
                 self.log()

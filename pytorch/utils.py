@@ -1,5 +1,5 @@
 import math
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -16,10 +16,25 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def get_named_float_tensors(model: nn.Module, include_buffers: bool = True) -> List[Tuple[str, torch.Tensor]]:
+    unique_names_and_tensors = []
+
+    for name, param in model.named_parameters():
+        if param.dtype in [torch.float, torch.float16]:
+            unique_names_and_tensors.append((name, param))
+
+    if include_buffers:
+        for name, buffer in model.named_buffers():
+            if buffer.dtype in [torch.float, torch.float16]:
+                unique_names_and_tensors.append((name, buffer))
+
+    return unique_names_and_tensors
+
+
 @torch.no_grad()
-def update_model_ema(model: nn.Module, ema_model: nn.Module, mu: float = 0.95) -> None:
-    for weight, ema_weight in zip(model.parameters(), ema_model.parameters()):
-        ema_weight.mul_(mu).add_(weight, alpha=1 - mu)
+def update_ema_parameters(target_parameters, source_parameters, mu: float = 0.95) -> None:
+    for target_weight, source_weight in zip(target_parameters, source_parameters):
+        target_weight.mul_(mu).add_(source_weight, alpha=1 - mu)
 
 
 def get_text(path: str) -> List[str]:

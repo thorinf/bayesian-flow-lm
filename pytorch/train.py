@@ -32,7 +32,7 @@ def train():
     parser.add_argument('-wus', '--warmup_steps', type=int, default=1e5)
     parser.add_argument('-dcs', '--decay_steps', type=int, default=1e6)
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.1)
-    parser.add_argument('-ema', '--ema_rate', type=float, default=0.9999)
+    parser.add_argument('-ema', '--ema_rate', default="0.95, 0.9999")
 
     parser.add_argument('-slen', '--sequence_length', type=int, default=64)
     parser.add_argument('-nex', '--num_examples', type=int, default=8)
