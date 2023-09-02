@@ -8,7 +8,7 @@ from bayesian_flow_torch import BayesianFlow
 
 from data import SentencePieceTokenizer, TextDataset, Collate
 from model import SimplexTransformerModel
-from utils import count_parameters, cosine_decay_with_warmup, update_model_ema, get_text
+from utils import count_parameters, update_model_ema, get_text
 from monitoring import get_initialised_logger
 
 
@@ -153,7 +153,8 @@ def train():
     optim = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.98)
     )
 
     if 'optimizer_state_dict' in checkpoint:
@@ -162,7 +163,6 @@ def train():
 
     global_step = checkpoint.get('global_step', 0)
     logger.info(f"Number of completed training steps: {global_step:,}")
-    lr_lambda = lambda step: cosine_decay_with_warmup(step, args.learning_rate, args.warmup_steps, args.decay_steps)
 
     start_time, elapsed_iters, elapsed_tokens = time.time(), 0, 0
 
@@ -189,17 +189,18 @@ def train():
             elapsed_iters += 1
             elapsed_tokens += length_mask.sum().item()
 
-            if ((idx + 1) % args.accumulation_steps == 0) or (idx + 1 == len(dataloader)):
-                optim.param_groups[0]['lr'] = lr_lambda(global_step)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optim.step()
-                optim.zero_grad()
-                update_model_ema(model, ema_model, args.ema_momentum)
-                global_step += 1
+            if ((idx + 1) % args.accumulation_steps != 0) and (idx + 1 != len(dataloader)):
+                continue
 
-            if global_step % args.log_interval == 0:
-                end_time = time.time()
-                duration = end_time - start_time
+            optim.param_groups[0]['lr'] = args.learning_rate * min(global_step / args.warmup_steps, 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optim.step()
+            optim.zero_grad()
+            update_model_ema(model, ema_model, args.ema_momentum)
+            global_step += 1
+
+            if global_step % args.log_interval == 0 or (idx + 1 == len(dataloader)):
+                duration = time.time() - start_time
                 iter_rate, token_rate = elapsed_iters / duration, elapsed_tokens / duration
                 start_time, elapsed_iters, elapsed_tokens = time.time(), 0, 0
 
@@ -209,7 +210,7 @@ def train():
                     f"Throughput: {iter_rate:,.4f} it/s or {token_rate:,.4f} tok/s"
                 )
 
-            if ((idx + 1) % args.save_interval == 0) or (idx + 1 == len(dataloader)):
+            if global_step % args.save_interval == 0 or (idx + 1 == len(dataloader)):
                 checkpoint = {
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
@@ -219,7 +220,7 @@ def train():
                 logger.info(f"Saving checkpoint: {checkpoint_path}.")
                 torch.save(checkpoint, checkpoint_path)
 
-            if ((idx + 1) % args.sample_interval == 0) or (idx + 1 == len(dataloader)):
+            if global_step % args.sample_interval == 0 or (idx + 1 == len(dataloader)):
                 logger.info(f"Sampling from model started.")
 
                 output_ids = eval_model(
