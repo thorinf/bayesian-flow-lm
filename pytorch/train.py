@@ -1,14 +1,14 @@
 import argparse
 import os
+import time
 
 import torch
 from torch.utils.data import DataLoader
 from bayesian_flow_torch import BayesianFlow
-from tqdm import tqdm
 
 from data import SentencePieceTokenizer, TextDataset, Collate
 from model import SimplexTransformerModel
-from utils import append_dims, count_parameters, cosine_decay_with_warmup, update_model_ema, get_text
+from utils import count_parameters, cosine_decay_with_warmup, update_model_ema, get_text
 from monitoring import get_initialised_logger
 
 
@@ -39,26 +39,30 @@ def train():
     parser = argparse.ArgumentParser()
     parser.add_argument('-ep', '--epochs', type=int, default=100)
     parser.add_argument('-bsz', '--batch_size', type=int, default=128)
-    parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4)
-    parser.add_argument('-wups', '--warmup_steps', type=int, default=1e5)
-    parser.add_argument('-decs', '--decay_steps', type=int, default=1e6)
-    parser.add_argument('-wd', '--weight_decay', type=float, default=0.1)
     parser.add_argument('-acc', '--accumulation_steps', type=int, default=1)
-    parser.add_argument('-ema', '--ema_momentum', type=float, default=0.9999)
+    parser.add_argument('-svi', '--log_interval', type=int, default=100)
+    parser.add_argument('-lgi', '--save_interval', type=int, default=1000)
+    parser.add_argument('-smi', '--sample_interval', type=int, default=10000)
 
     parser.add_argument('-mdim', '--model_dim', type=int, default=1024)
-    parser.add_argument('-numl', '--num_layers', type=int, default=8)
-    parser.add_argument('-numh', '--num_heads', type=int, default=8)
-    parser.add_argument('-do', '--dropout_prob', type=float, default=0.1)
-    parser.add_argument('-ld', '--layerdrop_prob', type=float, default=0.0)
+    parser.add_argument('-nl', '--num_layers', type=int, default=8)
+    parser.add_argument('-nh', '--num_heads', type=int, default=8)
+    parser.add_argument('-dop', '--dropout_prob', type=float, default=0.1)
+    parser.add_argument('-ldp', '--layerdrop_prob', type=float, default=0.0)
 
+    parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4)
+    parser.add_argument('-wus', '--warmup_steps', type=int, default=1e5)
+    parser.add_argument('-dcs', '--decay_steps', type=int, default=1e6)
+    parser.add_argument('-wd', '--weight_decay', type=float, default=0.1)
+    parser.add_argument('-ema', '--ema_momentum', type=float, default=0.9999)
+
+    parser.add_argument('-slen', '--sequence_length', type=int, default=64)
+    parser.add_argument('-nex', '--num_examples', type=int, default=8)
     parser.add_argument('-b', '--beta', type=float, default=3.0)
 
     parser.add_argument('-mdir', '--model_dir', type=str, required=True)
     parser.add_argument('-d', '--data_path', type=str, required=True)
     parser.add_argument('-spm', '--spm_model', type=str, required=True)
-    parser.add_argument('-slen', '--sequence_length', type=int, default=64)
-    parser.add_argument('-ngen', '--num_examples', type=int, default=8)
 
     args = parser.parse_args()
 
@@ -85,14 +89,14 @@ def train():
     model.to(device)
 
     if os.path.exists(checkpoint_path):
-        logger.info(f"Reloading checkpoint: {checkpoint_path}.")
+        logger.info(f"Reloading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path)
     else:
-        logger.info(f"Starting new checkpoint: {checkpoint_path}.")
+        logger.info(f"Starting new checkpoint: {checkpoint_path}")
         checkpoint = {}
 
     if 'model_state_dict' in checkpoint:
-        logger.info(f"Model state found in checkpoint.")
+        logger.info(f"Model state found in checkpoint")
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
     num_params = count_parameters(model)
@@ -109,10 +113,10 @@ def train():
     ema_model.to(device)
 
     if 'ema_model_state_dict' in checkpoint:
-        logger.info(f"EMA model state found in checkpoint.")
+        logger.info(f"EMA model state found in checkpoint")
         ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
     else:
-        logger.info(f"Initialising EMA model with model state.")
+        logger.info(f"Initialising EMA model with model state")
         ema_model.load_state_dict(model.state_dict())
 
     bayesian_flow = BayesianFlow(num_classes=len(tokenizer), beta=args.beta)
@@ -153,23 +157,20 @@ def train():
     )
 
     if 'optimizer_state_dict' in checkpoint:
-        logger.info(f"Optimizer state found in checkpoint.")
+        logger.info(f"Optimizer state found in checkpoint")
         optim.load_state_dict(checkpoint['optimizer_state_dict'])
 
     global_step = checkpoint.get('global_step', 0)
-    logger.info(f"Number of completed training steps: {global_step}")
+    logger.info(f"Number of completed training steps: {global_step:,}")
     lr_lambda = lambda step: cosine_decay_with_warmup(step, args.learning_rate, args.warmup_steps, args.decay_steps)
+
+    start_time, elapsed_iters, elapsed_tokens = time.time(), 0, 0
 
     for ep in range(0, args.epochs):
         model.train()
-        pbar = tqdm(dataloader)
-        pbar.set_description(f"epoch: {ep}")
 
-        for idx, (ids, lengths, conditional_mask) in enumerate(pbar):
-
-            ids, lengths, conditional_mask = ids.to(device), lengths.to(device), conditional_mask.to(device)
-
-            length_mask = torch.lt(torch.arange(ids.shape[1], device=device).unsqueeze(0), lengths.unsqueeze(1))
+        for idx, (ids, length_mask, conditional_mask) in enumerate(dataloader):
+            ids, length_mask, conditional_mask = ids.to(device), length_mask.to(device), conditional_mask.to(device)
 
             loss = bayesian_flow.discrete_data_continuous_loss(
                 model=model,
@@ -185,6 +186,9 @@ def train():
 
             (loss / args.accumulation_steps).backward()
 
+            elapsed_iters += 1
+            elapsed_tokens += length_mask.sum().item()
+
             if ((idx + 1) % args.accumulation_steps == 0) or (idx + 1 == len(dataloader)):
                 optim.param_groups[0]['lr'] = lr_lambda(global_step)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -193,12 +197,19 @@ def train():
                 update_model_ema(model, ema_model, args.ema_momentum)
                 global_step += 1
 
-            metrics = {
-                "loss": loss.item()
-            }
-            pbar.set_postfix(metrics)
+            if global_step % args.log_interval == 0:
+                end_time = time.time()
+                duration = end_time - start_time
+                iter_rate, token_rate = elapsed_iters / duration, elapsed_tokens / duration
+                start_time, elapsed_iters, elapsed_tokens = time.time(), 0, 0
 
-            if ((idx + 1) % 500 == 0) or (idx + 1 == len(dataloader)):
+                logger.info(
+                    f"Updates: {global_step:,}, "
+                    f"Loss: {loss.item():,.4e}, "
+                    f"Throughput: {iter_rate:,.4f} it/s or {token_rate:,.4f} tok/s"
+                )
+
+            if ((idx + 1) % args.save_interval == 0) or (idx + 1 == len(dataloader)):
                 checkpoint = {
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
@@ -208,7 +219,7 @@ def train():
                 logger.info(f"Saving checkpoint: {checkpoint_path}.")
                 torch.save(checkpoint, checkpoint_path)
 
-            if ((idx + 1) % 5000 == 0) or (idx + 1 == len(dataloader)):
+            if ((idx + 1) % args.sample_interval == 0) or (idx + 1 == len(dataloader)):
                 logger.info(f"Sampling from model started.")
 
                 output_ids = eval_model(
@@ -219,7 +230,6 @@ def train():
                     conditional_ids=conditional_ids
                 )
                 decoded = tokenizer.decode(output_ids)
-
                 [logger.info(f"Sample {i}:\t{text}") for i, text in enumerate(decoded)]
                 model.train()
 
