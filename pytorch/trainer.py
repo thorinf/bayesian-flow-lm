@@ -154,36 +154,37 @@ class Trainer:
         self.iters_since_log = 0
         self.prev_log_time = current_time
 
-    def sample(self):
-        logger.info(f"Sampling started...")
-
-        model, tokenizer, bayesian_flow = self.model, self.tokenizer, self.bayesian_flow
-
-        conditional_ids = tokenizer.encode(self.sample_conditioning)
-
+    def prepare_conditioning(self):
         size = (self.sample_num_examples, self.sequence_length)
-        ids = torch.zeros(size, dtype=torch.int64, device=self.device)
-        conditional_mask = torch.zeros_like(ids, dtype=torch.bool)
+        conditional_ids = torch.zeros(size, dtype=torch.int64, device=self.device)
+        conditional_mask = torch.zeros_like(conditional_ids, dtype=torch.bool)
 
-        if conditional_ids is not None:
-            for i, sublist in enumerate(conditional_ids):
+        if self.sample_conditioning:
+            sample_conditioning = self.tokenizer.encode(self.sample_conditioning)
+            for i, sublist in enumerate(sample_conditioning):
                 sublist_len = len(sublist)
-                ids[i, :sublist_len] = torch.tensor(sublist, device=self.device)
+                conditional_ids[i, :sublist_len] = torch.tensor(sublist, device=self.device)
                 conditional_mask[i, :sublist_len] = True
 
-        model.eval()
-        probs = bayesian_flow.discrete_data_sample(
-            model,
-            size=size,
+        return conditional_ids, conditional_mask
+
+    @torch.inference_mode()
+    def sample(self):
+        self.model.eval()
+        conditional_ids, conditional_mask = self.prepare_conditioning()
+        logger.info(f"Sampling started...")
+        probs = self.bayesian_flow.discrete_data_sample(
+            self.model,
+            size=conditional_ids.size(),
             num_steps=self.sample_iterations,
             device=self.device,
             conditional_mask=conditional_mask,
-            conditional_ids=ids
+            conditional_ids=conditional_ids
         )
-        model.train()
+        self.model.train()
 
         output_ids = probs.argmax(-1).cpu().tolist()
-        decoded = tokenizer.decode(output_ids)
+        decoded = self.tokenizer.decode(output_ids)
         [logger.info(f"Sample {i}:\t{text}") for i, text in enumerate(decoded)]
 
     def optimise(self):
