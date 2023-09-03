@@ -19,7 +19,7 @@ class SentencePieceTokenizer:
         self.bos_id: int = self.sp_model.bos_id()
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
-        logger.info(f"Vocab Size: {self.num_words:,}.")
+        logger.info(f"Vocab Size: {self.num_words:,}")
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     def __len__(self):
@@ -53,22 +53,24 @@ class TextDataset(torch.utils.data.Dataset):
 
 
 class Collate:
-    def __init__(self, crop_length=-1, eos_id=-1, pad_id=-1, length_includes_pad=False, fold_size=None):
-        if pad_id < 0:
-            assert not length_includes_pad, f"pad_id must be non-negative to include padding in length. Got {pad_id}."
-            assert not fold_size, f"pad_id must be non-negative to allow sequence folding. Got {pad_id}."
+    def __init__(self, crop_length=-1, eos_id=-1, pad_id=-1, random_length_expansion=False, fold_size=None):
+        if pad_id < 0 and eos_id < 0:
+            assert not random_length_expansion, \
+                f"To add random length to the pad_id or eos_id must be non-negative, got {pad_id} and {eos_id}."
+            assert not fold_size, \
+                f"To fold the sequence the pad_id or eos_id must be non-negative, got {pad_id} and {eos_id}."
         self.crop_length = crop_length
         self.fold_size = fold_size
         self.eos_id = eos_id
         self.pad_id = pad_id
         self.pad_insert_rate = 0.0
-        self.length_includes_pad = length_includes_pad
+        self.random_length_expansion = random_length_expansion
 
     def fold(self, ids):
         # Pad the list for folding
         remainder = len(ids) % self.fold_size
         if remainder != 0:
-            ids += [self.pad_id] * (self.fold_size - remainder)
+            ids += [self.pad_id if self.pad_id > 0 else self.eos_id] * (self.fold_size - remainder)
         # Fold the list
         ids = [ids[i:i + self.fold_size] for i in range(0, len(ids), self.fold_size)]
         return ids
@@ -109,12 +111,12 @@ class Collate:
 
         # Sample a random amount of padding
         padded_lengths = [random.randint(length, max(lengths)) for length in lengths]
-        lengths = torch.tensor(padded_lengths) if self.length_includes_pad else torch.tensor(lengths)
+        lengths = torch.tensor(padded_lengths) if self.random_length_expansion else torch.tensor(lengths)
 
         ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(x, dtype=torch.int64) for x in ids],
             batch_first=True,
-            padding_value=self.pad_id
+            padding_value=self.pad_id if self.pad_id > 0 else self.eos_id
         )
         conditional_mask = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(x, dtype=torch.bool) for x in conditional_mask],

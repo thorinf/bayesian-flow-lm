@@ -224,7 +224,7 @@ class Trainer:
             crop_length=self.sequence_length,
             eos_id=tokenizer.eos_id,
             pad_id=tokenizer.pad_id,
-            length_includes_pad=True
+            random_length_expansion=True
         )
 
         train_dataloader = DataLoader(
