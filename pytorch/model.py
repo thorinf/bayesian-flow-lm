@@ -99,6 +99,7 @@ class SimplexTransformerModel(nn.Module):
             self,
             num_classes: int,
             model_dim: int = 1024,
+            embedding_dim: int = 1024,
             num_layers: int = 8,
             num_heads: int = 16,
             learned_sinusoidal_dim: int = 128,
@@ -111,8 +112,10 @@ class SimplexTransformerModel(nn.Module):
         self.num_heads = num_heads
         self.layerdrop_prob = layerdrop_prob
 
+        self.embedding = nn.Embedding(num_classes, embedding_dim)
+
         self.project = nn.Sequential(
-            nn.Linear(num_classes, model_dim, bias=False),
+            nn.Linear(embedding_dim, model_dim, bias=True),
             nn.Dropout(p=dropout_prob)
         )
 
@@ -171,7 +174,8 @@ class SimplexTransformerModel(nn.Module):
             simplex = torch.where(append_dims(conditional_mask, simplex.ndim), conditional_simplex, simplex)
             t = t.masked_fill(append_dims(conditional_mask, t.ndim), 1.0)
 
-        x = self.project(simplex) + self.time_mlp(t)
+        x = simplex @ self.embedding.weight
+        x = self.project(x) + self.time_mlp(t)
 
         if length_mask is None:
             length_mask = torch.ones((bsz, slen), dtype=torch.bool, device=x.device)
