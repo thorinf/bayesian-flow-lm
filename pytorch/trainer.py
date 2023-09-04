@@ -160,10 +160,10 @@ class Trainer:
         conditional_mask = torch.zeros_like(conditional_ids, dtype=torch.bool)
 
         if self.sample_conditioning:
-            sample_conditioning = self.tokenizer.encode(self.sample_conditioning)
-            for i, sublist in enumerate(sample_conditioning):
-                sublist_len = len(sublist)
-                conditional_ids[i, :sublist_len] = torch.tensor(sublist, device=self.device)
+            for i, text in enumerate(self.sample_conditioning):
+                sample_conditioning = self.tokenizer.encode(text, bos=True, eos=False)
+                sublist_len = len(sample_conditioning)
+                conditional_ids[i, :sublist_len] = torch.tensor(sample_conditioning, device=self.device)
                 conditional_mask[i, :sublist_len] = True
 
         return conditional_ids, conditional_mask
@@ -220,11 +220,13 @@ class Trainer:
     def run_training(self):
         model, tokenizer, bayesian_flow = self.model, self.tokenizer, self.bayesian_flow
 
+        pad_sequence_value = self.tokenizer.pad_id if self.tokenizer.pad_id > 0 else self.tokenizer.eos_id
         collate = Collate(
-            crop_length=self.sequence_length,
-            eos_id=tokenizer.eos_id,
-            pad_id=tokenizer.pad_id,
-            random_length_expansion=True
+            max_sequence_length=self.sequence_length,
+            pad_sequence_value=pad_sequence_value,
+            random_length_expansion=True,
+            insert_value=tokenizer.pad_id,
+            insert_rate=0.0
         )
 
         train_dataloader = DataLoader(
