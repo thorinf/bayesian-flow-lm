@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data import Collate
-from utils import get_named_float_tensors, update_ema_parameters
+from utils import get_named_float_tensors, get_weight_decay_parameters, update_ema_parameters
 
 logger = getLogger()
 
@@ -60,8 +60,14 @@ class Trainer:
         self.model.to(self.device)
         self.load_model_checkpoint()
 
+        decay, no_decay = get_weight_decay_parameters(self.model)
+        optim_groups = [
+            {"params": decay, "weight_decay": self.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+
         self.optim = torch.optim.AdamW(
-            self.model.parameters(),
+            optim_groups,
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
             betas=(0.9, 0.98)

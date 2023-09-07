@@ -1,5 +1,5 @@
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,24 @@ def append_dims(tensor, target_dims):
 
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def get_weight_decay_parameters(
+        model: nn.Module,
+        whitelist_modules: Tuple[Type[nn.Module]] = (nn.Linear, )
+) -> Tuple[List, List]:
+    decay = set()
+    for module_name, module in model.named_modules():
+        for param_name, param in module.named_parameters():
+            full_param_name = '%s.%s' % (module_name, param_name) if module_name else param_name
+            if param_name.endswith('weight') and isinstance(module, whitelist_modules) and param.requires_grad:
+                decay.add(full_param_name)
+    param_dict = {param_name: param for param_name, param in model.named_parameters() if param.requires_grad}
+    no_decay = set(param_dict.keys()) - decay
+
+    decay = [param_dict[param_name] for param_name in sorted(list(decay))]
+    no_decay = [param_dict[param_name] for param_name in sorted(list(no_decay))]
+    return decay, no_decay
 
 
 def get_named_float_tensors(model: nn.Module, include_buffers: bool = True) -> List[Tuple[str, torch.Tensor]]:
