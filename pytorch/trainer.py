@@ -162,30 +162,31 @@ class Trainer:
 
     def prepare_conditioning(self):
         size = (self.sample_num_examples, self.sequence_length)
-        conditional_ids = torch.zeros(size, dtype=torch.int64, device=self.device)
-        conditional_mask = torch.zeros_like(conditional_ids, dtype=torch.bool)
+        conditioning_ids = torch.zeros(size, dtype=torch.int64, device=self.device)
+        conditioning_mask = torch.zeros_like(conditioning_ids, dtype=torch.bool)
 
         if self.sample_conditioning:
             for i, text in enumerate(self.sample_conditioning):
                 sample_conditioning = self.tokenizer.encode(text, bos=True, eos=False)
                 sublist_len = len(sample_conditioning)
-                conditional_ids[i, :sublist_len] = torch.tensor(sample_conditioning, device=self.device)
-                conditional_mask[i, :sublist_len] = True
+                conditioning_ids[i, :sublist_len] = torch.tensor(sample_conditioning, device=self.device)
+                conditioning_mask[i, :sublist_len] = True
 
-        return conditional_ids, conditional_mask
+        conditioning = torch.nn.functional.one_hot(conditioning_ids, num_classes=self.model.num_classes)
+        return conditioning, conditioning_mask
 
     @torch.inference_mode()
     def sample(self):
         self.model.eval()
-        conditional_ids, conditional_mask = self.prepare_conditioning()
+        conditioning, conditioning_mask = self.prepare_conditioning()
         logger.info(f"Sampling started...")
         probs = self.bayesian_flow.discrete_data_sample(
             self.model,
-            size=conditional_ids.size(),
+            size=conditioning_mask.size(),
             num_steps=self.sample_iterations,
             device=self.device,
-            conditional_mask=conditional_mask,
-            conditional_ids=conditional_ids
+            conditioning=conditioning,
+            conditioning_mask=conditioning_mask
         )
         self.model.train()
 
@@ -246,36 +247,32 @@ class Trainer:
         data_iter = iter(train_dataloader)
 
         logger.info(f"Training loop running...")
-
-        self.loss_elem_since_optim = 0
-
         while True:
             for _ in range(self.accumulation_steps):
                 try:
-                    ids, length_mask, conditional_mask = next(data_iter)
+                    ids, length_mask, conditioning_mask = next(data_iter)
                 except StopIteration:
                     data_iter = iter(train_dataloader)
-                    ids, length_mask, conditional_mask = next(data_iter)
+                    ids, length_mask, conditioning_mask = next(data_iter)
 
                 ids = ids.to(self.device)
                 length_mask = length_mask.to(self.device)
-                conditional_mask = conditional_mask.to(self.device)
+                conditioning_mask = conditioning_mask.to(self.device)
+
+                conditioning = torch.nn.functional.one_hot(ids, num_classes=self.model.num_classes)
 
                 loss = bayesian_flow.discrete_data_continuous_loss(
                     model=model,
                     target=ids,
                     reduction='none',
                     length_mask=length_mask,
-                    conditional_mask=conditional_mask,
-                    conditional_ids=ids
+                    conditioning=conditioning,
+                    conditioning_mask=conditioning_mask
                 )
 
-                loss_mask = torch.logical_and(length_mask, ~conditional_mask)
+                loss_mask = torch.logical_and(length_mask, ~conditioning_mask)
                 loss = (loss * loss_mask.float()).sum()
-
-                # For optimisation
-                loss.backward()
-                self.loss_elem_since_optim += loss_mask.sum().item()
+                (loss / loss_mask.sum()).backward()
 
                 # For logging
                 self.loss_iter = (loss / loss_mask.sum()).item()

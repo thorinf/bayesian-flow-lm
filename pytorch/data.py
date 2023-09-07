@@ -76,7 +76,7 @@ class Collate:
         self.insert_rate = insert_rate
 
     @staticmethod
-    def generate_conditional_mask(length):
+    def generate_conditioning_mask(length):
         conditional_mask = [False] * length
         mask_span_length = random.randint(0, length - 1)
         start_index = random.randint(0, length - mask_span_length)
@@ -101,13 +101,13 @@ class Collate:
             ids = ids[start_index:end_index]
 
         # Create a conditional mask
-        conditional_mask = self.generate_conditional_mask(len(ids))
+        conditioning_mask = self.generate_conditioning_mask(len(ids))
 
-        return ids, len(ids), conditional_mask
+        return ids, len(ids), conditioning_mask
 
     def __call__(self, batch):
         processed = list(map(self.process_ids, batch))
-        ids, lengths, conditional_mask = zip(*processed)
+        ids, lengths, conditioning_mask = zip(*processed)
 
         # Sample a random amount of padding
         padded_lengths = [random.randint(length, max(lengths)) for length in lengths]
@@ -118,12 +118,12 @@ class Collate:
             batch_first=True,
             padding_value=self.pad_sequence_value
         )
-        conditional_mask = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(x, dtype=torch.bool) for x in conditional_mask],
+        conditioning_mask = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(x, dtype=torch.bool) for x in conditioning_mask],
             batch_first=True,
             padding_value=False
         )
 
         length_mask = torch.lt(torch.arange(ids.shape[1]).unsqueeze(0), lengths.unsqueeze(1))
 
-        return ids, length_mask, conditional_mask
+        return ids, length_mask, conditioning_mask

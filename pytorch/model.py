@@ -108,39 +108,41 @@ class SimplexTransformerModel(nn.Module):
     ):
         super(SimplexTransformerModel, self).__init__()
         self.num_classes = num_classes
+        self.embedding_dim = embedding_dim
+        self.model_dim = model_dim
         self.num_layers = num_layers
         self.num_heads = num_heads
+        self.learned_sinusoidal_dim = learned_sinusoidal_dim
+        self.dropout_prob = dropout_prob
         self.layerdrop_prob = layerdrop_prob
 
-        self.embedding = nn.Embedding(num_classes, embedding_dim)
+        self.embedding = nn.Embedding(self.num_classes, self.embedding_dim)
 
         self.project = nn.Sequential(
-            nn.Linear(embedding_dim, model_dim, bias=True),
-            nn.Dropout(p=dropout_prob)
+            nn.Linear(self.embedding_dim, self.model_dim, bias=True),
+            nn.Dropout(p=self.dropout_prob)
         )
 
         self.time_mlp = nn.Sequential(
             LearnedSinusoidalPosEmb(learned_sinusoidal_dim),
-            nn.Linear(learned_sinusoidal_dim + 1, 128),
+            nn.Linear(self.learned_sinusoidal_dim + 1, 128),
             nn.GELU(),
-            nn.Dropout(p=dropout_prob),
-            nn.Linear(128, model_dim),
+            nn.Dropout(p=self.dropout_prob),
+            nn.Linear(128, self.model_dim),
         )
 
         self.encoder_layers = nn.ModuleList(
             TransformerEncoderLayer(
-                dim=model_dim,
-                hidden_dim=4 * model_dim,
-                num_heads=num_heads,
-                drop_prob=dropout_prob,
+                dim=self.model_dim,
+                hidden_dim=4 * self.model_dim,
+                num_heads=self.num_heads,
+                drop_prob=self.dropout_prob,
                 elementwise_affine=True
             )
             for _ in range(num_layers))
 
-        self.out = nn.Sequential(
-            nn.LayerNorm(model_dim),
-            nn.Linear(model_dim, num_classes, bias=False)
-        )
+        self.norm = nn.LayerNorm(self.model_dim)
+        self.output = nn.Linear(self.model_dim, self.num_classes, bias=False)
 
         self.apply(self.initialise_weights)
 
@@ -151,7 +153,7 @@ class SimplexTransformerModel(nn.Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.001)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     @staticmethod
     def self_attention_mask(length_mask):
@@ -164,15 +166,14 @@ class SimplexTransformerModel(nn.Module):
         mask_upper = torch.triu(mask).repeat(1, num_heads // 2, 1, 1)
         return torch.concat([mask_lower, mask_upper], dim=1)
 
-    def forward(self, simplex, t, length_mask=None, conditional_mask=None, conditional_ids=None):
+    def forward(self, simplex, t, length_mask=None, conditioning=None, conditioning_mask=None):
         bsz, slen, _ = simplex.shape
 
         t = append_dims(t, simplex.ndim)
 
-        if conditional_mask is not None and conditional_ids is not None:
-            conditional_simplex = F.one_hot(conditional_ids, self.num_classes)
-            simplex = torch.where(append_dims(conditional_mask, simplex.ndim), conditional_simplex, simplex)
-            t = t.masked_fill(append_dims(conditional_mask, t.ndim), 1.0)
+        if conditioning is not None and conditioning_mask is not None:
+            simplex = torch.where(append_dims(conditioning_mask, simplex.ndim), conditioning, simplex)
+            t = t.masked_fill(append_dims(conditioning_mask, t.ndim), 1.0)
 
         x = simplex @ self.embedding.weight
         x = self.project(x) + self.time_mlp(t)
@@ -180,14 +181,12 @@ class SimplexTransformerModel(nn.Module):
         if length_mask is None:
             length_mask = torch.ones((bsz, slen), dtype=torch.bool, device=x.device)
 
-        x = x * append_dims(length_mask, x.ndim)
-        attention_mask = self.mixed_masking(length_mask, self.num_heads)
+        attention_mask = self.self_attention_mask(length_mask)
 
         for i, layer in enumerate(self.encoder_layers):
             if self.training and random.uniform(0, 1) < self.layerdrop_prob:
                 continue
             x = layer(x, attention_mask)
-
-        x = x * append_dims(length_mask, x.ndim)
-
-        return self.out(x)
+        x = self.norm(x)
+        x = self.output(x)
+        return x
