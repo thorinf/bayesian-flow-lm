@@ -1,19 +1,93 @@
 import argparse
 import os
-from logging import getLogger
-
-from bayesian_flow_torch import BayesianFlow
-
-from data import SentencePieceTokenizer, TextDataset
+import logger
+from data import SentencePieceTokenizer, TextDataset, Collate, infinite_loader
+from torch.utils.data import DataLoader
 from model import SimplexTransformerModel
+from bayesian_flow_torch import BayesianFlow
 from trainer import Trainer
 from utils import get_text
-from monitoring import get_initialised_logger
-
-logger = getLogger()
+import wandb
 
 
-def train():
+def main():
+    args = create_argparser().parse_args()
+    logger.configure(args.model_dir)
+
+    tokenizer = SentencePieceTokenizer(args.spm_model)
+
+    logger.log("creating model and bayesian flow...")
+
+    model = SimplexTransformerModel(
+        num_classes=len(tokenizer),
+        model_dim=args.model_dim,
+        embedding_dim=args.model_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        dropout_prob=args.dropout_prob,
+        layerdrop_prob=args.layerdrop_prob,
+    )
+
+    bayesian_flow = BayesianFlow(num_classes=len(tokenizer), beta=args.beta)
+
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.log(f"total parameter count: {num_params:,}")
+
+    wandb.init(
+        name=args.model_dir,
+        project=os.getenv("WANDB_PROJECT", "bayesian_flow_lm"),
+        dir=args.model_dir,
+    )
+    wandb.config.update(args.__dict__, allow_val_change=True)
+
+    dataset = TextDataset(path=args.data_path, tokenizer=tokenizer)
+
+    pad_sequence_value = tokenizer.pad_id if tokenizer.pad_id > 0 else tokenizer.eos_id
+    collate = Collate(
+        max_sequence_length=args.sequence_length,
+        pad_sequence_value=pad_sequence_value,
+        random_length_expansion=True,
+        insert_value=tokenizer.pad_id,
+        insert_rate=0.0
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=False,
+        collate_fn=collate
+    )
+    dataloader = infinite_loader(dataloader)
+
+    conditional_starts = get_text("conditional_starts.txt")
+
+    trainer = Trainer(
+        model=model,
+        bayesian_flow=bayesian_flow,
+        tokenizer=tokenizer,
+        data=dataloader,
+        batch_size=args.batch_size,
+        accumulation_steps=args.accumulation_steps,
+        learning_rate=args.learning_rate,
+        ema_rate=args.ema_rate,
+        model_dir=args.model_dir,
+        log_interval=args.log_interval,
+        save_interval=args.save_interval,
+        sample_interval=args.sample_interval,
+        sample_size=(args.num_examples, args.sequence_length),
+        sample_conditioning=conditional_starts,
+        sample_iterations=1000,
+        resume_checkpoint=True,
+        warmup_steps=args.warmup_steps,
+        weight_decay=args.weight_decay,
+        gradient_clipping=args.gradient_clipping,
+    )
+    trainer.run_loop()
+
+
+def create_argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument('-ep', '--epochs', type=int, default=100)
     parser.add_argument('-bsz', '--batch_size', type=int, default=128)
@@ -29,66 +103,20 @@ def train():
     parser.add_argument('-ldp', '--layerdrop_prob', type=float, default=0.0)
 
     parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4)
-    parser.add_argument('-wus', '--warmup_steps', type=int, default=1e5)
-    parser.add_argument('-dcs', '--decay_steps', type=int, default=1e6)
+    parser.add_argument('-wus', '--warmup_steps', type=int, default=1e4)
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.1)
+    parser.add_argument('-gc', '--gradient_clipping', type=float, default=-1.0)
     parser.add_argument('-ema', '--ema_rate', default="0.95, 0.9999")
 
     parser.add_argument('-slen', '--sequence_length', type=int, default=64)
+    parser.add_argument('-b', '--beta', type=float, default=0.1)
     parser.add_argument('-nex', '--num_examples', type=int, default=8)
-    parser.add_argument('-b', '--beta', type=float, default=3.0)
 
     parser.add_argument('-mdir', '--model_dir', type=str, required=True)
     parser.add_argument('-d', '--data_path', type=str, required=True)
     parser.add_argument('-spm', '--spm_model', type=str, required=True)
-
-    args = parser.parse_args()
-
-    logfile_path = os.path.join(args.model_dir, "logfile.log")
-    get_initialised_logger(logfile_path=logfile_path)
-
-    tokenizer = SentencePieceTokenizer(args.spm_model)
-
-    model = SimplexTransformerModel(
-        num_classes=len(tokenizer),
-        model_dim=args.model_dim,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        dropout_prob=args.dropout_prob,
-        layerdrop_prob=args.layerdrop_prob,
-    )
-
-    bayesian_flow = BayesianFlow(num_classes=len(tokenizer), beta=args.beta)
-
-    dataset = TextDataset(path=args.data_path, tokenizer=tokenizer)
-
-    conditional_starts = get_text("conditional_starts.txt")
-
-    trainer = Trainer(
-        model=model,
-        tokenizer=tokenizer,
-        bayesian_flow=bayesian_flow,
-        train_dataset=dataset,
-        batch_size=args.batch_size,
-        sequence_length=args.sequence_length,
-        accumulation_steps=args.accumulation_steps,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        ema_rate=args.ema_rate,
-        model_dir=args.model_dir,
-        log_interval=args.log_interval,
-        save_interval=args.save_interval,
-        sample_interval=args.sample_interval,
-        sample_num_examples=args.num_examples,
-        sample_conditioning=conditional_starts,
-        sample_iterations=100,
-        resume_checkpoint=True
-    )
-
-    trainer.sample()
-
-    trainer.run_training()
+    return parser
 
 
 if __name__ == "__main__":
-    train()
+    main()

@@ -1,57 +1,59 @@
-import copy
 import os
+import os.path as osp
 import time
-from logging import getLogger
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from unidecode import unidecode
 
-from data import Collate
 from utils import get_named_float_tensors, get_weight_decay_parameters, update_ema_parameters
 
-logger = getLogger()
+import logger
 
 
 class Trainer:
     def __init__(
             self,
             model,
-            tokenizer,
             bayesian_flow,
-            train_dataset,
+            tokenizer,
+            data,
             batch_size,
-            sequence_length,
             accumulation_steps,
             learning_rate,
-            weight_decay,
             ema_rate,
             model_dir,
             log_interval,
             save_interval,
             sample_interval,
-            sample_num_examples,
+            sample_size,
             sample_conditioning,
             sample_iterations,
-            resume_checkpoint
+            resume_checkpoint,
+            warmup_steps=1e5,
+            weight_decay=0.0,
+            gradient_clipping=-1.0
     ):
         self.model = model
-        self.tokenizer = tokenizer
         self.bayesian_flow = bayesian_flow
-        self.train_dataset = train_dataset
+        self.tokenizer = tokenizer
+        self.data = data
         self.batch_size = batch_size
-        self.sequence_length = sequence_length
         self.accumulation_steps = accumulation_steps
         self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
         self.ema_rate = [ema_rate] if isinstance(ema_rate, float) else [float(x) for x in ema_rate.split(",")]
         self.model_dir = model_dir
         self.log_interval = log_interval
         self.save_interval = save_interval
         self.sample_interval = sample_interval
-        self.sample_num_examples = sample_num_examples
+        self.sample_size = sample_size
         self.sample_conditioning = sample_conditioning
         self.sample_iterations = sample_iterations
         self.resume_checkpoint = resume_checkpoint
+        self.warmup_steps = warmup_steps
+        self.weight_decay = weight_decay
+        self.gradient_clipping = gradient_clipping
+
         self.global_step = 0
         self.max_updates = None
 
@@ -66,50 +68,44 @@ class Trainer:
             {"params": no_decay, "weight_decay": 0.0},
         ]
 
-        self.optim = torch.optim.AdamW(
+        self.opt = torch.optim.AdamW(
             optim_groups,
             lr=self.learning_rate,
-            weight_decay=self.weight_decay,
-            betas=(0.9, 0.98)
+            betas=(0.9, 0.99)
         )
         self.load_optim_checkpoint()
 
         self.ema_named_tensors = []
         self.load_ema_checkpoints()
 
-        self.loss_elem_since_optim = None
-        self.iters_since_log = 0
-        self.prev_log_time = time.time()
-        self.loss_iter = 0
-
     def load_model_checkpoint(self):
-        checkpoint_path = os.path.join(self.model_dir, "model.pt")
-        if os.path.exists(checkpoint_path):
-            logger.info(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint_path = osp.join(self.model_dir, "model.pt")
+        if osp.exists(checkpoint_path):
+            logger.info(f"loading checkpoint from {checkpoint_path}")
             model_state_dict = torch.load(checkpoint_path)
             self.model.load_state_dict(model_state_dict, strict=False)
 
     def load_optim_checkpoint(self):
-        checkpoint_path = os.path.join(self.model_dir, "optim.pt")
-        if os.path.exists(checkpoint_path):
-            logger.info(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint_path = osp.join(self.model_dir, "optim.pt")
+        if osp.exists(checkpoint_path):
+            logger.info(f"loading checkpoint from {checkpoint_path}")
             optim_state_dict = torch.load(checkpoint_path)
             self.global_step = optim_state_dict.pop('global_step', self.global_step)
-            self.optim.load_state_dict(optim_state_dict)
+            self.opt.load_state_dict(optim_state_dict)
 
     def load_ema_checkpoints(self):
         all_named_tensors = get_named_float_tensors(self.model, include_buffers=True)
         for rate in self.ema_rate:
-            ema_checkpoint_path = os.path.join(self.model_dir, f"ema_{rate}.pt")
-            if os.path.exists(ema_checkpoint_path):
-                logger.info(f"Loading EMA checkpoint: {ema_checkpoint_path}")
+            ema_checkpoint_path = osp.join(self.model_dir, f"ema_{rate}.pt")
+            if osp.exists(ema_checkpoint_path):
+                logger.info(f"loading EMA checkpoint: {ema_checkpoint_path}")
                 ema_state_dict = torch.load(ema_checkpoint_path)
                 # Update or get tensors from the EMA state dict using model tensors names
-                ema_named_tensors = [(key, ema_state_dict.get(key, value)) for key, value in all_named_tensors]
+                ema_named_tensors = [(key, ema_state_dict[key]) for key, value in all_named_tensors]
             else:
-                logger.info(f"Initializing new EMA model with EMA rate of {rate}")
+                logger.info(f"initializing new EMA model with EMA rate of {rate}")
                 # Initialize EMA tensors with model's named tensors
-                ema_named_tensors = copy.deepcopy(all_named_tensors)
+                ema_named_tensors = [(key, value.data.clone()) for key, value in all_named_tensors]
             self.ema_named_tensors.append(ema_named_tensors)
 
     def save(self):
@@ -117,19 +113,19 @@ class Trainer:
             ema_state_dict = self.model.state_dict()
             for name, tensor in ema_named_tensors:
                 ema_state_dict[name] = tensor
-            checkpoint_path = os.path.join(self.model_dir, f"ema_{rate}.pt")
-            logger.info(f"Saving checkpoint: {checkpoint_path}")
+            checkpoint_path = osp.join(self.model_dir, f"ema_{rate}.pt")
+            logger.info(f"saving checkpoint: {checkpoint_path}")
             torch.save(ema_state_dict, checkpoint_path)
 
         model_state_dict = self.model.state_dict()
-        checkpoint_path = os.path.join(self.model_dir, "model.pt")
-        logger.info(f"Saving checkpoint: {checkpoint_path}")
+        checkpoint_path = osp.join(self.model_dir, "model.pt")
+        logger.info(f"saving checkpoint: {checkpoint_path}")
         torch.save(model_state_dict, checkpoint_path)
 
-        optim_state_dict = self.optim.state_dict()
+        optim_state_dict = self.opt.state_dict()
         optim_state_dict['global_step'] = self.global_step
-        checkpoint_path = os.path.join(self.model_dir, "optim.pt")
-        logger.info(f"Saving checkpoint: {checkpoint_path}")
+        checkpoint_path = osp.join(self.model_dir, "optim.pt")
+        logger.info(f"saving checkpoint: {checkpoint_path}")
         torch.save(optim_state_dict, checkpoint_path)
 
     def update_ema_parameters(self):
@@ -144,25 +140,105 @@ class Trainer:
 
             update_ema_parameters(ema_model_parameters, model_parameters, rate)
 
-    def log(self):
-        current_time = time.time()
-        time_elapsed = current_time - self.prev_log_time
-        iteration_rate = self.iters_since_log / time_elapsed
+    def run_loop(self):
+        logger.info(f"training loop started...")
+        while True:
+            self.run_step()
+            if self.global_step % self.log_interval == 0:
+                logger.dump_kvs()
+            if self.global_step % self.save_interval == 0:
+                self.save()
+            if self.global_step % self.sample_interval == 0:
+                self.sample()
+            if self.max_updates is not None and self.global_step >= self.max_updates:
+                break
 
-        log_msg = (
-            f"Global step: {self.global_step:,}, "
-            f"Iteration loss: {self.loss_iter:.4e}, "
-            f"Learning rate: {self.optim.param_groups[0]['lr']:.4e}, "
-            f"Throughput: {iteration_rate:.4f} it/s"
-        )
-        logger.info(log_msg)
+    def run_step(self):
+        self.forward_backward()
+        self.optimise()
+        self.update_ema_parameters()
+        self.log_step()
 
-        self.iters_since_log = 0
-        self.prev_log_time = current_time
+    def forward_backward(self):
+        self.opt.zero_grad()
+        for _ in range(self.accumulation_steps):
+            ids, length_mask, conditioning_mask = next(self.data)
+
+            ids = ids.to(self.device)
+            length_mask = length_mask.to(self.device)
+            conditioning_mask = conditioning_mask.to(self.device)
+
+            ids = ids.to(self.device)
+            length_mask = length_mask.to(self.device)
+            conditioning_mask = conditioning_mask.to(self.device)
+
+            conditioning = torch.nn.functional.one_hot(ids, num_classes=self.model.num_classes)
+            loss_mask = torch.logical_and(length_mask, ~conditioning_mask)
+
+            bf_loss, probs = self.bayesian_flow.discrete_data_continuous_loss(
+                model=self.model,
+                target=ids,
+                reduction='none',
+                return_distribution=True,
+                length_mask=length_mask,
+                conditioning=conditioning,
+                conditioning_mask=conditioning_mask
+            )
+            bf_loss = (bf_loss * loss_mask.float()).sum() / loss_mask.sum()
+            loss = bf_loss
+            loss.backward()
+
+            logger.log_kv_mean("training_loss", loss.item(), loss_mask.sum().item())
+            logger.log_kv_mean("bf_loss", bf_loss.item(), loss_mask.sum().item())
+
+            n_token, n_mask = length_mask.sum().item(), conditioning_mask.sum().item()
+            logger.log_kv_mean("n_token", n_token)
+            logger.log_kv_mean("p_mask", n_mask / n_token, n_token)
+
+    def optimise(self):
+        self.scale_grads()
+        self.log_grad_norm()
+        self.update_lr()
+        if self.gradient_clipping > 0:
+            self.grad_clip()
+        self.opt.step()
+        self.global_step += 1
+
+    def scale_grads(self):
+        n_loss_elem = getattr(self, "n_loss_elem", self.accumulation_steps)
+        if hasattr(self, "n_loss_elem"):
+            setattr(self, "n_loss_elem", 0)
+
+        if n_loss_elem == 0:
+            logger.error("tried to optimize, but number of elements in loss was 0")
+            return False
+
+        if n_loss_elem > 1:
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.data.div_(n_loss_elem)
+
+    def grad_clip(self):
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
+
+    def log_grad_norm(self):
+        sq_sum = 0.0
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            sq_sum += (p.grad ** 2).sum().item()
+        logger.log_kv_mean("grad_norm", np.sqrt(sq_sum))
+
+    def update_lr(self):
+        lr = self.learning_rate * min(self.global_step / self.warmup_steps, 1.0)
+        self.opt.param_groups[0]['lr'] = lr
+        logger.log_kv("lr", lr)
+
+    def log_step(self):
+        logger.log_kv("step", self.global_step)
 
     def prepare_conditioning(self):
-        size = (self.sample_num_examples, self.sequence_length)
-        conditioning_ids = torch.zeros(size, dtype=torch.int64, device=self.device)
+        conditioning_ids = torch.zeros(self.sample_size, dtype=torch.int64, device=self.device)
         conditioning_mask = torch.zeros_like(conditioning_ids, dtype=torch.bool)
 
         if self.sample_conditioning:
@@ -172,13 +248,14 @@ class Trainer:
                 conditioning_ids[i, :sublist_len] = torch.tensor(sample_conditioning, device=self.device)
                 conditioning_mask[i, :sublist_len] = True
 
-        conditioning = torch.nn.functional.one_hot(conditioning_ids, num_classes=self.model.num_classes)
-        return conditioning, conditioning_mask
+        return conditioning_ids, conditioning_mask
 
     @torch.inference_mode()
     def sample(self):
         self.model.eval()
-        conditioning, conditioning_mask = self.prepare_conditioning()
+        conditioning_ids, conditioning_mask = self.prepare_conditioning()
+        conditioning = torch.nn.functional.one_hot(conditioning_ids, num_classes=self.model.num_classes)
+
         logger.info(f"Sampling started...")
         probs = self.bayesian_flow.discrete_data_sample(
             self.model,
@@ -190,105 +267,6 @@ class Trainer:
         )
         self.model.train()
 
-        output_ids = probs.argmax(-1).cpu().tolist()
+        output_ids = torch.where(conditioning_mask, conditioning_ids, probs.argmax(-1)).cpu().tolist()
         decoded = self.tokenizer.decode(output_ids)
-        [logger.info(f"Sample {i}:\t{text}") for i, text in enumerate(decoded)]
-
-    def optimise(self):
-        # Determine the number of elements that contributed to the loss
-        loss_elem = self.loss_elem_since_optim if self.loss_elem_since_optim is not None else self.accumulation_steps
-
-        # Reset loss_elem_since_optim to 0 only if it was not None
-        if self.loss_elem_since_optim is not None:
-            self.loss_elem_since_optim = 0
-
-        # Check for invalid number of elements in loss
-        if loss_elem == 0:
-            logger.error("Tried to optimize, but number of elements in loss was 0")
-            return
-
-        # Scale the gradients by number of elements, i.e. trainable indexes since last update
-        if loss_elem > 1:
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    param.grad.data.div_(loss_elem)
-
-        # Update learning rate and perform optimization
-        self.optim.param_groups[0]['lr'] = self.learning_rate * min(self.global_step / 10000, 1.0)
-
-        # Clip gradients and update model parameters
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.optim.step()
-        self.optim.zero_grad()
-
-        # Increment the global step counter
-        self.global_step += 1
-
-    def run_training(self):
-        model, tokenizer, bayesian_flow = self.model, self.tokenizer, self.bayesian_flow
-
-        pad_sequence_value = self.tokenizer.pad_id if self.tokenizer.pad_id > 0 else self.tokenizer.eos_id
-        collate = Collate(
-            max_sequence_length=self.sequence_length,
-            pad_sequence_value=pad_sequence_value,
-            random_length_expansion=True,
-            insert_value=tokenizer.pad_id,
-            insert_rate=0.0
-        )
-
-        train_dataloader = DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=False,
-            collate_fn=collate
-        )
-        data_iter = iter(train_dataloader)
-
-        logger.info(f"Training loop running...")
-        while True:
-            for _ in range(self.accumulation_steps):
-                try:
-                    ids, length_mask, conditioning_mask = next(data_iter)
-                except StopIteration:
-                    data_iter = iter(train_dataloader)
-                    ids, length_mask, conditioning_mask = next(data_iter)
-
-                ids = ids.to(self.device)
-                length_mask = length_mask.to(self.device)
-                conditioning_mask = conditioning_mask.to(self.device)
-
-                conditioning = torch.nn.functional.one_hot(ids, num_classes=self.model.num_classes)
-
-                loss = bayesian_flow.discrete_data_continuous_loss(
-                    model=model,
-                    target=ids,
-                    reduction='none',
-                    length_mask=length_mask,
-                    conditioning=conditioning,
-                    conditioning_mask=conditioning_mask
-                )
-
-                loss_mask = torch.logical_and(length_mask, ~conditioning_mask)
-                loss = (loss * loss_mask.float()).sum()
-                (loss / loss_mask.sum()).backward()
-
-                # For logging
-                self.loss_iter = (loss / loss_mask.sum()).item()
-                self.iters_since_log += 1
-
-            self.optimise()
-            self.update_ema_parameters()
-
-            if self.global_step % self.log_interval == 0:
-                self.log()
-
-            if self.global_step % self.save_interval == 0:
-                self.save()
-
-            if self.global_step % self.sample_interval == 0:
-                self.sample()
-
-            if self.max_updates is not None and self.global_step >= self.max_updates:
-                break
+        [logger.info(f"Sample {i}:\t{unidecode(text)}") for i, text in enumerate(decoded)]

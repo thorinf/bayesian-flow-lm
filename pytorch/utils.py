@@ -12,13 +12,9 @@ def append_dims(tensor, target_dims):
     return tensor[(...,) + (None,) * (target_dims - tensor_dims)]
 
 
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
 def get_weight_decay_parameters(
         model: nn.Module,
-        whitelist_modules: Tuple[Type[nn.Module]] = (nn.Linear, )
+        whitelist_modules: Tuple[Type[nn.Module]] = (nn.Linear,)
 ) -> Tuple[List, List]:
     decay = set()
     for module_name, module in model.named_modules():
