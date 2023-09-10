@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from unidecode import unidecode
 
-from utils import get_named_float_tensors, get_weight_decay_parameters, update_ema_parameters
+from utils import get_named_float_tensors, get_weight_decay_parameters, update_ema_parameters, compute_anisotropy
 
 import logger
 
@@ -233,6 +233,9 @@ class Trainer:
         lr = self.learning_rate * min(self.global_step / self.warmup_steps, 1.0)
         self.opt.param_groups[0]['lr'] = lr
         logger.log_kv("lr", lr)
+
+    def log_anisotropy(self):
+        logger.log_kv("anisotropy", compute_anisotropy(self.model.embedding.weight).item())
 
     def log_step(self):
         logger.log_kv("step", self.global_step)

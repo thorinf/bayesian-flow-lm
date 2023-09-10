@@ -51,6 +51,15 @@ def update_ema_parameters(target_parameters, source_parameters, mu: float = 0.95
         target_weight.mul_(mu).add_(source_weight, alpha=1 - mu)
 
 
+@torch.no_grad()
+def compute_anisotropy(embedding_weight):
+    num_embeddings, _ = embedding_weight.shape
+    num_pairs = (num_embeddings - 1) * num_embeddings
+    norm_embeddings = torch.nn.functional.normalize(embedding_weight, dim=-1)
+    cossim = norm_embeddings @ norm_embeddings.transpose(0, 1)
+    return (cossim.sum() - num_embeddings) / num_pairs
+
+
 def get_text(path: str) -> List[str]:
     with open(path, "r", encoding='utf-8') as file:
         return [line.strip() for line in file]
