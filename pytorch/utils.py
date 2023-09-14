@@ -54,10 +54,14 @@ def update_ema_parameters(target_parameters, source_parameters, mu: float = 0.95
 @torch.no_grad()
 def compute_anisotropy(embedding_weight):
     num_embeddings, _ = embedding_weight.shape
-    num_pairs = (num_embeddings - 1) * num_embeddings
     norm_embeddings = torch.nn.functional.normalize(embedding_weight, dim=-1)
+
     cossim = norm_embeddings @ norm_embeddings.transpose(0, 1)
-    return (cossim.sum() - num_embeddings) / num_pairs
+
+    upper_triangle_indices = torch.triu_indices(num_embeddings, num_embeddings, offset=1)
+    upper_triangle_values = cossim[upper_triangle_indices[0], upper_triangle_indices[1]]
+    anisotropy = upper_triangle_values.mean()
+    return anisotropy
 
 
 def get_text(path: str) -> List[str]:
