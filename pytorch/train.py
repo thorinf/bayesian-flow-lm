@@ -37,6 +37,7 @@ def main():
         name=args.model_dir,
         project=os.getenv("WANDB_PROJECT", "bayesian_flow_lm"),
         dir=args.model_dir,
+        resume=True
     )
     wandb.config.update(args.__dict__, allow_val_change=True)
 
@@ -90,7 +91,7 @@ def main():
 def create_argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument('-ep', '--epochs', type=int, default=100)
-    parser.add_argument('-bsz', '--batch_size', type=int, default=128)
+    parser.add_argument('-bsz', '--batch_size', type=int, default=64)
     parser.add_argument('-acc', '--accumulation_steps', type=int, default=1)
     parser.add_argument('-svi', '--log_interval', type=int, default=100)
     parser.add_argument('-lgi', '--save_interval', type=int, default=1000)
@@ -104,12 +105,12 @@ def create_argparser():
 
     parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4)
     parser.add_argument('-wus', '--warmup_steps', type=int, default=1e4)
-    parser.add_argument('-wd', '--weight_decay', type=float, default=0.1)
-    parser.add_argument('-gc', '--gradient_clipping', type=float, default=-1.0)
+    parser.add_argument('-wd', '--weight_decay', type=float, default=0.0)
+    parser.add_argument('-gc', '--gradient_clipping', type=float, default=1.0)
     parser.add_argument('-ema', '--ema_rate', default="0.95, 0.9999")
 
     parser.add_argument('-slen', '--sequence_length', type=int, default=64)
-    parser.add_argument('-b', '--beta', type=float, default=0.1)
+    parser.add_argument('-b', '--beta', type=float, default=0.005)
     parser.add_argument('-nex', '--num_examples', type=int, default=8)
 
     parser.add_argument('-mdir', '--model_dir', type=str, required=True)

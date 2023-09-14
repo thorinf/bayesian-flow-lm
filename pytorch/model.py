@@ -10,12 +10,13 @@ from utils import append_dims
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, num_heads, qkv_bias=True, rotary_embedding=None):
+    def __init__(self, dim, num_heads, qkv_bias=True, rotary_embedding=None, dropout_prob=0.0):
         super(MultiHeadAttention, self).__init__()
         assert (dim % num_heads == 0)
         self.model_dim = dim
         self.head_dim = dim // num_heads
         self.num_heads = num_heads
+        self.dropout_prob = dropout_prob
 
         self.w_q = nn.Linear(dim, dim, bias=qkv_bias)
         self.w_k = nn.Linear(dim, dim, bias=qkv_bias)
@@ -43,7 +44,8 @@ class MultiHeadAttention(nn.Module):
             k = self.rotary_emb.rotate_queries_or_keys(k)
 
         with torch.backends.cuda.sdp_kernel(enable_flash=True):
-            output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.1 if self.training else 0.0)
+            dropout_p = self.dropout_prob if self.training else 0.0
+            output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p)
 
         # score = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
         # if mask is not None:
@@ -56,32 +58,26 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, dim, hidden_dim, emb_dim, num_heads=8, drop_prob=0.0):
+    def __init__(self, dim, hidden_dim, emb_dim, num_heads=8, dropout_prob=0.0):
         super(TransformerEncoderLayer, self).__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
-        self.emb1 = nn.Sequential(
-            nn.Dropout(p=drop_prob),
-            nn.Linear(emb_dim, 2 * dim),
-        )
+        self.emb1 = nn.Linear(emb_dim, 2 * dim)
         self.attention = MultiHeadAttention(
             dim=dim,
             num_heads=num_heads,
             qkv_bias=True,
-            rotary_embedding=RotaryEmbedding(dim=int(dim / num_heads))
+            rotary_embedding=RotaryEmbedding(dim=dim // (num_heads * 2)),
+            dropout_prob=dropout_prob
         )
-        self.dropout1 = nn.Dropout(p=drop_prob)
+        self.dropout1 = nn.Dropout(p=dropout_prob)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
-        self.emb2 = nn.Sequential(
-            nn.Dropout(p=drop_prob),
-            nn.Linear(emb_dim, 2 * dim),
-        )
+        self.emb2 = nn.Linear(emb_dim, 2 * dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
-            nn.Dropout(p=drop_prob),
             nn.Linear(hidden_dim, dim),
         )
-        self.dropout2 = nn.Dropout(p=drop_prob)
+        self.dropout2 = nn.Dropout(p=dropout_prob)
 
     def forward(self, x, emb, mask=None):
         h = self.norm1(x)
@@ -134,13 +130,14 @@ class SimplexTransformerModel(nn.Module):
 
         self.embedding = nn.Embedding(self.num_classes, self.embedding_dim)
 
+        self.dropout = nn.Dropout(p=self.dropout_prob)
+
         self.project = nn.Linear(self.embedding_dim, self.model_dim)
 
         self.time_embed = nn.Sequential(
             LearnedSinusoidalPosEmb(learned_sinusoidal_dim),
             nn.Linear(self.learned_sinusoidal_dim + 1, 128),
             nn.GELU(),
-            nn.Dropout(p=self.dropout_prob),
             nn.Linear(128, 128),
             nn.GELU()
         )
@@ -151,9 +148,11 @@ class SimplexTransformerModel(nn.Module):
                 hidden_dim=4 * self.model_dim,
                 emb_dim=128,
                 num_heads=self.num_heads,
-                drop_prob=self.dropout_prob
+                dropout_prob=self.dropout_prob
             )
             for _ in range(num_layers))
+
+        self.norm = nn.LayerNorm(self.model_dim)
 
         self.output = nn.Linear(self.model_dim, self.num_classes)
 
@@ -179,12 +178,14 @@ class SimplexTransformerModel(nn.Module):
         attention_mask = self.self_attention_mask(length_mask)
 
         emb = self.time_embed(append_dims(t, simplex.ndim))
-        h = self.project(simplex @ self.embedding.weight)
+        e = self.dropout(simplex @ self.embedding.weight)
+        h = self.project(e)
 
         for i, layer in enumerate(self.encoder_layers):
             if self.training and random.uniform(0, 1) < self.layerdrop_prob:
                 continue
             h = layer(h, emb=emb, mask=attention_mask)
 
+        h = self.norm(h)
         output = self.output(h).float()
         return output

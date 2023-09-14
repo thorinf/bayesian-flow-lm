@@ -7,6 +7,7 @@ import torch
 from unidecode import unidecode
 
 from utils import get_named_float_tensors, get_weight_decay_parameters, update_ema_parameters, compute_anisotropy
+from utils import cosine_decay_with_warmup
 
 import logger
 
@@ -55,7 +56,7 @@ class Trainer:
         self.gradient_clipping = gradient_clipping
 
         self.global_step = 0
-        self.max_updates = None
+        self.max_updates = 1e6
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -68,11 +69,7 @@ class Trainer:
             {"params": no_decay, "weight_decay": 0.0},
         ]
 
-        self.opt = torch.optim.AdamW(
-            optim_groups,
-            lr=self.learning_rate,
-            betas=(0.9, 0.99)
-        )
+        self.opt = torch.optim.AdamW(optim_groups, lr=self.learning_rate)
         self.load_optim_checkpoint()
 
         self.ema_named_tensors = []
@@ -141,7 +138,6 @@ class Trainer:
             update_ema_parameters(ema_model_parameters, model_parameters, rate)
 
     def run_loop(self):
-        logger.info(f"training loop started...")
         while True:
             self.run_step()
             if self.global_step % self.log_interval == 0:
@@ -150,13 +146,15 @@ class Trainer:
                 self.save()
             if self.global_step % self.sample_interval == 0:
                 self.sample()
+                logger.info(f"resuming training...")
             if self.max_updates is not None and self.global_step >= self.max_updates:
-                break
+                logger.info(f"training completed {self.max_updates} maximum steps...")
 
     def run_step(self):
         self.forward_backward()
         self.optimise()
         self.update_ema_parameters()
+        self.log_anisotropy()
         self.log_step()
 
     def forward_backward(self):
@@ -188,8 +186,9 @@ class Trainer:
             loss = bf_loss
             loss.backward()
 
-            logger.log_kv_mean("training_loss", loss.item(), loss_mask.sum().item())
-            logger.log_kv_mean("bf_loss", bf_loss.item(), loss_mask.sum().item())
+            n_elem = loss_mask.sum().item()
+            logger.log_kv_mean("training_loss", loss.item(), n_elem)
+            logger.log_kv_mean("bf_loss", bf_loss.item(), n_elem)
 
             n_token, n_mask = length_mask.sum().item(), conditioning_mask.sum().item()
             logger.log_kv_mean("n_token", n_token)
@@ -230,7 +229,8 @@ class Trainer:
         logger.log_kv_mean("grad_norm", np.sqrt(sq_sum))
 
     def update_lr(self):
-        lr = self.learning_rate * min(self.global_step / self.warmup_steps, 1.0)
+        lr = cosine_decay_with_warmup(self.global_step, self.learning_rate, int(self.warmup_steps),
+                                      int(self.max_updates))
         self.opt.param_groups[0]['lr'] = lr
         logger.log_kv("lr", lr)
 
@@ -259,7 +259,7 @@ class Trainer:
         conditioning_ids, conditioning_mask = self.prepare_conditioning()
         conditioning = torch.nn.functional.one_hot(conditioning_ids, num_classes=self.model.num_classes)
 
-        logger.info(f"Sampling started...")
+        logger.info(f"sampling started...")
         probs = self.bayesian_flow.discrete_data_sample(
             self.model,
             size=conditioning_mask.size(),
@@ -272,4 +272,4 @@ class Trainer:
 
         output_ids = torch.where(conditioning_mask, conditioning_ids, probs.argmax(-1)).cpu().tolist()
         decoded = self.tokenizer.decode(output_ids)
-        [logger.info(f"Sample {i}:\t{unidecode(text)}") for i, text in enumerate(decoded)]
+        [logger.info(f"sample {i}:\t{unidecode(text)}") for i, text in enumerate(decoded)]
