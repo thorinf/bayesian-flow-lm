@@ -103,7 +103,7 @@ def create_argparser():
     parser.add_argument('-dop', '--dropout_prob', type=float, default=0.1)
     parser.add_argument('-ldp', '--layerdrop_prob', type=float, default=0.0)
 
-    parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4)
+    parser.add_argument('-lr', '--learning_rate', type=float, default=5e-5)
     parser.add_argument('-wus', '--warmup_steps', type=int, default=1e4)
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.0)
     parser.add_argument('-gc', '--gradient_clipping', type=float, default=1.0)
