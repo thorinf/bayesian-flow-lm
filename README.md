@@ -2,9 +2,9 @@
 
 Applying [Bayesian Flow][1] to Language Modeling in Pytorch.
 
-## How to Run:
+## How to Run
 
-### Environment Setup:
+### Environment Setup
 
 Aside from PyTorch, the training script requires three other packages;
 <a href="https://github.com/google/sentencepiece">sentencepiece</a>, 
@@ -19,7 +19,7 @@ pip install rotary-embedding-torch
 pip install git+https://github.com/thorinf/bayesian-flow-pytorch
 ```
 
-### Creating a Tokenizer:
+### Creating a Tokenizer
 
 To use a SentencePiece tokenizer model, you have two options:
 
@@ -53,7 +53,7 @@ spm.SentencePieceTrainer.train(
 )
 ```
 
-### Training:
+### Training
 
 The model can be trained with the command:
 
@@ -62,7 +62,9 @@ mkdir MODEL_DIRECTORY
 python train.py -d=TXT_CORPUS -spm=SPM_MODEL -mdir=MODEL_DIRECTORY
 ```
 
-## Design & Implementation Notes:
+## Design & Implementation Notes
+
+### Architecture
 
 There is currently no implementations for Bayesian Flow Networks at this scale. 
 In the [paper][1], Graves et al. train a language model but only for graphemes, which is a small vocabulary.
@@ -83,6 +85,21 @@ To inform the model that this is a conditional embedding, the time-steps for con
 During generation a time-step of 0 should indicate that the distribution is completely inaccurate, 
 but a time-step of 1 should indicate that the distribution is accurate.
 By setting the conditioning positions to have a time-step of 1, we have told the model that the prediction is final.
+
+### Experimentation
+
+As Bayesian Flow Networks are a new class of Generative Model and there is little literature on the topic,
+selecting hyperparameters for training is perhaps the more difficult part.
+Specifically, selecting `beta` is very important.
+There appears to be an inverse relationship between `num_classes` and `beta`.
+If `beta` is too high given the `num_classes` then the output of `theta`
+will often match the ground truth distribution.
+Since there is little to no corruption of the data, there is little for the model to learn.
+In these cases of a large `beta`, the loss may start high because of loss weight scaling, 
+but fall to near zero after relatively few weight updates.
+However, if `beta` is set lower, then the loss may start lower because of scaling, 
+but the loss will not instantly drop.
+Exactly how to select `beta` isn't clear, but picking something sufficiently small to corrupt the data is necessary.
 
 ## Citations
 
