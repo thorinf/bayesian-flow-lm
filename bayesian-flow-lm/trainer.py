@@ -173,15 +173,15 @@ class Trainer:
             conditioning = torch.nn.functional.one_hot(ids, num_classes=self.model.num_classes)
             loss_mask = torch.logical_and(length_mask, ~conditioning_mask)
 
-            bf_loss, probs = self.bayesian_flow.discrete_data_continuous_loss(
+            results = self.bayesian_flow.discrete_data_continuous_loss(
                 model=self.model,
                 target=ids,
                 reduction='none',
-                return_distribution=True,
                 length_mask=length_mask,
                 conditioning=conditioning,
                 conditioning_mask=conditioning_mask
             )
+            bf_loss = results.loss
             bf_loss = (bf_loss * loss_mask.float()).sum() / loss_mask.sum()
             loss = bf_loss
             loss.backward()
