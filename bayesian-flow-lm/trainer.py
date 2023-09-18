@@ -128,14 +128,12 @@ class Trainer:
     def update_ema_parameters(self):
         model_state_dict = self.model.state_dict()
         for ema_named_tensors, rate in zip(self.ema_named_tensors, self.ema_rate):
-            model_parameters = []
-            ema_model_parameters = []
+            ema_parameters_list, model_parameters_list = zip(*[
+                (ema_parameter, model_state_dict[key])
+                for key, ema_parameter in ema_named_tensors
+            ])
 
-            for key, ema_parameter in ema_named_tensors:
-                ema_model_parameters.append(ema_parameter)
-                model_parameters.append(model_state_dict[key])
-
-            update_ema_parameters(ema_model_parameters, model_parameters, rate)
+            update_ema_parameters(ema_parameters_list, model_parameters_list, rate)
 
     def run_loop(self):
         while True:
@@ -189,6 +187,12 @@ class Trainer:
             n_elem = loss_mask.sum().item()
             logger.log_kv_mean("training_loss", loss.item(), n_elem)
             logger.log_kv_mean("bf_loss", bf_loss.item(), n_elem)
+
+            ids = ids.masked_fill(~loss_mask, -100)
+            ce_theta = torch.nn.functional.nll_loss(results.input_probs.log().transpose(1, -1), ids)
+            ce_p_0 = torch.nn.functional.nll_loss(results.output_probs.log().transpose(1, -1), ids)
+            ce_delta = ce_theta - ce_p_0
+            logger.log_kv_mean("ce_delta", ce_delta.item(), n_elem)
 
             n_token, n_mask = length_mask.sum().item(), conditioning_mask.sum().item()
             logger.log_kv_mean("n_token", n_token)
