@@ -1,5 +1,6 @@
 import argparse
 import os
+import json
 import logger
 from data import SentencePieceTokenizer, TextDataset, Collate, infinite_loader
 from torch.utils.data import DataLoader
@@ -33,6 +34,10 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     logger.log(f"total parameter count: {num_params:,}")
 
+    logger.log(f"saving the hyperparameters to {args.model_dir}/training_args.json")
+    with open(f"{args.model_dir}/training_args.json", "w") as f:
+        json.dump(args.__dict__, f, indent=2)
+
     wandb.init(
         name=args.model_dir,
         project=os.getenv("WANDB_PROJECT", "bayesian_flow_lm"),
@@ -56,7 +61,7 @@ def main():
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=1,
         pin_memory=False,
         collate_fn=collate
     )

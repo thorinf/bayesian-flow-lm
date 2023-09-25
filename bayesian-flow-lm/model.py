@@ -45,6 +45,7 @@ class MultiHeadAttention(nn.Module):
 
         with torch.backends.cuda.sdp_kernel(enable_flash=True):
             dropout_p = self.dropout_prob if self.training else 0.0
+            mask = torch.where(mask, torch.tensor(0.0), torch.tensor(-1e9))
             output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p)
 
         # score = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
@@ -82,13 +83,13 @@ class TransformerEncoderLayer(nn.Module):
     def forward(self, x, emb, mask=None):
         h = self.norm1(x)
         scale, shift = self.emb1(emb).chunk(2, dim=-1)
-        h = h * (1 + scale) + shift
+        h = h * scale + shift
         h = self.attention(q=h, k=h, v=h, mask=mask)
         x = x + self.dropout1(h)
 
         h = self.norm2(x)
         scale, shift = self.emb2(emb).chunk(2, dim=-1)
-        h = h * (1 + scale) + shift
+        h = h * scale + shift
         h = self.ffn(h)
         x = x + self.dropout2(h)
         return x
@@ -130,14 +131,13 @@ class SimplexTransformerModel(nn.Module):
 
         self.embedding = nn.Embedding(self.num_classes, self.embedding_dim)
 
-        self.dropout = nn.Dropout(p=self.dropout_prob)
-
         self.project = nn.Linear(self.embedding_dim, self.model_dim)
 
         self.time_embed = nn.Sequential(
             LearnedSinusoidalPosEmb(learned_sinusoidal_dim),
             nn.Linear(self.learned_sinusoidal_dim + 1, 128),
             nn.GELU(),
+            nn.Dropout(self.dropout_prob),
             nn.Linear(128, 128),
             nn.GELU()
         )
@@ -150,9 +150,8 @@ class SimplexTransformerModel(nn.Module):
                 num_heads=self.num_heads,
                 dropout_prob=self.dropout_prob
             )
-            for _ in range(num_layers))
-
-        self.norm = nn.LayerNorm(self.model_dim)
+            for _ in range(num_layers)
+        )
 
         self.output = nn.Linear(self.model_dim, self.num_classes)
 
@@ -162,6 +161,11 @@ class SimplexTransformerModel(nn.Module):
         mask = torch.zeros(bsz, seqlen, seqlen, dtype=torch.bool, device=length_mask.device)
         mask = mask.masked_fill(length_mask.unsqueeze(1), True)
         return mask.unsqueeze(1)
+
+    def mixed_directional_mask(self, length_mask):
+        mask = self.self_attention_mask(length_mask)
+        cond = (torch.arange(self.num_heads, device=length_mask.device) % 2 == 0).unsqueeze(0)
+        return torch.where(append_dims(cond, mask.ndim), torch.tril(mask), torch.triu(mask))
 
     def forward(self, simplex, t, length_mask=None, conditioning=None, conditioning_mask=None):
         bsz, seqlen, _ = simplex.shape
@@ -175,17 +179,15 @@ class SimplexTransformerModel(nn.Module):
         if length_mask is None:
             length_mask = torch.ones((bsz, seqlen), dtype=torch.bool, device=simplex.device)
 
-        attention_mask = self.self_attention_mask(length_mask)
+        attention_mask = self.mixed_directional_mask(length_mask)
 
         emb = self.time_embed(append_dims(t, simplex.ndim))
-        e = self.dropout(simplex @ self.embedding.weight)
-        h = self.project(e)
+        h = self.project(simplex @ self.embedding.weight)
 
         for i, layer in enumerate(self.encoder_layers):
             if self.training and random.uniform(0, 1) < self.layerdrop_prob:
                 continue
             h = layer(h, emb=emb, mask=attention_mask)
 
-        h = self.norm(h)
         output = self.output(h).float()
         return output

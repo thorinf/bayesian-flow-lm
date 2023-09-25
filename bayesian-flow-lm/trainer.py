@@ -147,6 +147,7 @@ class Trainer:
                 logger.info(f"resuming training...")
             if self.max_updates is not None and self.global_step >= self.max_updates:
                 logger.info(f"training completed {self.max_updates} maximum steps...")
+                break
 
     def run_step(self):
         self.forward_backward()
