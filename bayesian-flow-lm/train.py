@@ -2,7 +2,7 @@ import argparse
 import os
 import json
 import logger
-from data import SentencePieceTokenizer, TextDataset, Collate, infinite_loader
+from data import SentencePieceTokenizer, TextDataset, PackedDataLoader, Collate, infinite_loader
 from torch.utils.data import DataLoader
 from model import SimplexTransformerModel
 from bayesian_flow_torch import BayesianFlow
@@ -57,14 +57,17 @@ def main():
         insert_rate=0.0
     )
 
-    dataloader = DataLoader(
+    dataloader = PackedDataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=1,
         pin_memory=False,
-        collate_fn=collate
+        collate_fn=collate.prepack_fn,
+        sizing_fn=collate.sizing_fn,
+        packed_collate_fn=collate.packed_collate_fn
     )
+
     dataloader = infinite_loader(dataloader)
 
     conditional_starts = get_text("conditional_starts.txt")
