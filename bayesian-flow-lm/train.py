@@ -86,6 +86,7 @@ def main():
         sample_conditioning=conditional_starts,
         sample_iterations=1000,
         resume_checkpoint=True,
+        use_fp16=args.use_fp16,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
         gradient_clipping=args.gradient_clipping,
@@ -110,6 +111,7 @@ def create_argparser():
 
     parser.add_argument('-lr', '--learning_rate', type=float, default=5e-5)
     parser.add_argument('-wus', '--warmup_steps', type=int, default=1e4)
+    parser.add_argument('-hp', '--use_fp16', type=bool, default=False)
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.0)
     parser.add_argument('-gc', '--gradient_clipping', type=float, default=1.0)
     parser.add_argument('-ema', '--ema_rate', default="0.95, 0.9999")
